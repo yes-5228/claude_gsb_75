@@ -4,7 +4,7 @@ from sqlalchemy import cast, func, or_
 from ..domain.constants import STATION_STATUS_LABELS, STATION_TYPE_LABELS
 from ..errors import ConflictError, NotFoundError
 from ..extensions import db
-from ..models import Exceedance, Measurement, Station
+from ..models import Exceedance, Measurement, Station, WeatherRecord
 
 
 def _split(value):
@@ -74,9 +74,14 @@ def delete_station(station):
     """Remove a station together with its measurements and exceedance records."""
     measurement_count = Measurement.query.filter_by(station_id=station.id).count()
     exceedance_count = Exceedance.query.filter_by(station_id=station.id).count()
+    weather_count = WeatherRecord.query.filter_by(station_id=station.id).count()
     db.session.delete(station)
     db.session.commit()
-    return {"measurements_removed": measurement_count, "exceedances_removed": exceedance_count}
+    return {
+        "measurements_removed": measurement_count,
+        "exceedances_removed": exceedance_count,
+        "weather_removed": weather_count,
+    }
 
 
 def stats_map(station_ids):

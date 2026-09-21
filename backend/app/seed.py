@@ -64,20 +64,90 @@ STATION_FACTOR = {
 HOURLY_POINTS = (2, 8, 14, 20)
 RECORDERS = ("李静", "王敏", "陈志强", "赵宇", "孙倩")
 
+# 深圳近海气候的各月平均气温 (℃), 用于生成有季节规律的气象演示数据
+MONTHLY_TEMP = {1: 15, 2: 16, 3: 19, 4: 23, 5: 26, 6: 28, 7: 29, 8: 29,
+                9: 28, 10: 25, 11: 21, 12: 17}
+# 各整点相对日均温的偏差 (昼夜节律)
+HOUR_TEMP_DELTA = {2: -3.0, 8: -1.0, 14: 4.0, 20: 1.0}
+# 各整点相对日均湿的偏差 (凌晨高、午后低, 与风解耦)
+HOUR_HUMIDITY_DELTA = {2: 8.0, 8: 4.0, 14: -10.0, 20: 2.0}
 
-def _value(pollutant, period, station_type, rng):
+
+def _hourly_weather(day, hour, rng):
+    """生成一次整点气象观测, 各要素取值符合常识范围."""
+    temp_base = MONTHLY_TEMP.get(day.month, 20) + HOUR_TEMP_DELTA[hour]
+    temperature = round(temp_base + rng.uniform(-2.0, 2.0), 1)
+    # 湿度围绕 74% 按昼夜节律波动, 与风速/降水独立
+    humidity_base = 74.0 + HOUR_HUMIDITY_DELTA[hour]
+    humidity = round(min(98.0, max(28.0, humidity_base + rng.uniform(-9, 9))), 0)
+    wind_speed = round(max(0.1, 2.6 + (1.0 if hour == 14 else 0.0) + rng.uniform(-1.6, 2.6)), 1)
+    # 夏半年主导偏南风 (120°~220°), 少量其它风向
+    if rng.random() < 0.78:
+        wind_direction = round(rng.uniform(120, 220), 0)
+    else:
+        wind_direction = round(rng.choice((30, 60, 250, 290, 330, 10)) + rng.uniform(-15, 15), 0) % 360
+    pressure = round(1008 - (temperature - 24) * 0.6 + rng.uniform(-2.0, 2.0), 1)
+    precipitation = round(rng.uniform(1.0, 22.0), 1) if rng.random() < 0.16 else 0.0
+    return {
+        "temperature": temperature,
+        "humidity": humidity,
+        "wind_speed": wind_speed,
+        "wind_direction": wind_direction,
+        "pressure": pressure,
+        "precipitation": precipitation,
+    }
+
+
+def _daily_weather(hourly_obs):
+    """由当日各整点观测汇总出日均气象 (风向取下午主导方位)."""
+    def avg(field):
+        return round(sum(item[field] for item in hourly_obs) / len(hourly_obs), 1)
+
+    return {
+        "temperature": avg("temperature"),
+        "humidity": round(avg("humidity")),
+        "wind_speed": avg("wind_speed"),
+        "wind_direction": hourly_obs[-1]["wind_direction"],
+        "pressure": avg("pressure"),
+        "precipitation": round(sum(item["precipitation"] for item in hourly_obs), 1),
+    }
+
+
+def _weather_modifier(pollutant, weather):
+    """让浓度与同期气象要素形成可辨识的统计关联 (扩散/沉降/光化学规律).
+
+    各污染物只受 1~2 个主导要素影响, 避免多因子互相稀释相关信号。
+    """
+    if not weather:
+        return 1.0
+    rain = 0.55 if weather["precipitation"] > 5 else 1.0       # 降水冲刷
+    if pollutant in {"PM25", "PM10"}:
+        wind = 1.0 - 0.14 * (weather["wind_speed"] - 2.8)
+        humidity = 1.0 + 0.006 * (weather["humidity"] - 72.0)  # 吸湿增长, 弱贡献
+        return max(0.3, wind * humidity * rain)
+    if pollutant in {"SO2", "NO2", "CO"}:
+        wind = 1.0 - 0.15 * (weather["wind_speed"] - 2.8)       # 风速越大扩散越好
+        return max(0.3, wind * rain)
+    if pollutant == "O3":
+        temp = 1.0 + 0.07 * (weather["temperature"] - 26.0)     # 高温强光化学生成
+        humidity_suppress = 1.3 - 0.004 * weather["humidity"]  # 高湿抑制光化学
+        return max(0.35, temp * humidity_suppress)
+    return 1.0
+
+
+def _value(pollutant, period, station_type, rng, weather=None):
     base = POLLUTANT_BASE[pollutant] * STATION_FACTOR.get(station_type, 1.0)
     if period == "hourly":
         base *= HOURLY_FACTOR[pollutant]
-    value = base * rng.uniform(0.72, 1.22)
-    if rng.random() < 0.12:  # 少量明显超标样本, 便于演示超标标注
-        value *= rng.uniform(1.8, 2.6)
+    value = base * _weather_modifier(pollutant, weather) * rng.uniform(0.9, 1.1)
+    if rng.random() < 0.04:  # 少量明显超标样本, 便于演示超标标注
+        value *= rng.uniform(1.8, 2.3)
     return round(value, 2 if pollutant == "CO" else 1)
 
 
 def seed_demo_data(days=5, rng=None, recorder_pool=RECORDERS):
     """Generate demo stations and monitoring records through the normal service path."""
-    from .services import measurement_service
+    from .services import measurement_service, weather_service
 
     rng = rng or random.Random(20260914)
     created_stations = []
@@ -88,12 +158,44 @@ def seed_demo_data(days=5, rng=None, recorder_pool=RECORDERS):
     db.session.commit()
 
     today = date.today()
-    totals = {"stations": len(created_stations), "measurements": 0, "exceedances": 0}
+    totals = {
+        "stations": len(created_stations), "measurements": 0, "exceedances": 0,
+        "weather": 0,
+    }
     for station in created_stations:
         for offset in range(days):
             day = today - timedelta(days=offset)
+            # 先生成当日各整点气象观测, 浓度取值再与同期气象联动
+            hourly_weather = {}
+            for hour in HOURLY_POINTS:
+                observed_at = datetime(day.year, day.month, day.day, hour, 0)
+                factors = _hourly_weather(day, hour, rng)
+                weather_result = weather_service.record_observation(
+                    station_id=station.id,
+                    measured_at=observed_at,
+                    period="hourly",
+                    factors=factors,
+                    data_source="device",
+                    recorder=rng.choice(recorder_pool),
+                )
+                hourly_weather[hour] = factors
+                totals["weather"] += 1
+
+            daily_weather = _daily_weather(list(hourly_weather.values()))
+            weather_service.record_observation(
+                station_id=station.id,
+                measured_at=datetime(day.year, day.month, day.day, 0, 0),
+                period="daily",
+                factors=daily_weather,
+                data_source="device",
+                recorder=rng.choice(recorder_pool),
+                remark="日均气象自动汇总",
+            )
+            totals["weather"] += 1
+
             daily_entries = [
-                {"pollutant": code, "value": _value(code, "daily", station.station_type, rng)}
+                {"pollutant": code,
+                 "value": _value(code, "daily", station.station_type, rng, daily_weather)}
                 for code in POLLUTANT_BASE
             ]
             result = measurement_service.record_entries(
@@ -110,7 +212,9 @@ def seed_demo_data(days=5, rng=None, recorder_pool=RECORDERS):
 
             for hour in HOURLY_POINTS:
                 hourly_entries = [
-                    {"pollutant": code, "value": _value(code, "hourly", station.station_type, rng)}
+                    {"pollutant": code,
+                     "value": _value(code, "hourly", station.station_type, rng,
+                                     hourly_weather[hour])}
                     for code in HOURLY_FACTOR
                 ]
                 result = measurement_service.record_entries(

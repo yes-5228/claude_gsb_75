@@ -18,6 +18,14 @@ EXCEEDANCE_LEVEL_LABELS = {"light": "轻度超标", "moderate": "中度超标", 
 
 EXCEEDANCE_STATUS_LABELS = {"pending": "待标注", "confirmed": "已确认", "ignored": "已忽略"}
 
+CORRELATION_STRENGTH_LABELS = {
+    "none": "无法计算",
+    "negligible": "极弱相关",
+    "weak": "弱相关",
+    "moderate": "中等相关",
+    "strong": "强相关",
+}
+
 
 def as_options(label_map):
     return [{"value": key, "label": label} for key, label in label_map.items()]

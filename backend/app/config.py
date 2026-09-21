@@ -37,6 +37,7 @@ class BaseConfig:
     MAX_PAGE_SIZE = 200
     MAX_BATCH_SIZE = 500
     MAX_EXPORT_ROWS = 20000
+    MAX_CORRELATION_POINTS = 10000
 
     AUTO_INIT_DB = _as_bool(os.getenv("AUTO_INIT_DB"), True)
     AUTO_SEED = _as_bool(os.getenv("AUTO_SEED"), True)

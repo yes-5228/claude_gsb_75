@@ -2,7 +2,7 @@
 import click
 
 from .extensions import db
-from .models import Exceedance, Measurement, Station
+from .models import Exceedance, Measurement, Station, WeatherRecord
 
 
 def register_commands(app):
@@ -26,7 +26,7 @@ def register_commands(app):
         totals = seed_demo_data(days=days)
         click.echo(
             "演示数据写入完成: 监测点 %(stations)s 个, 监测数据 %(measurements)s 条, "
-            "超标记录 %(exceedances)s 条" % totals
+            "超标记录 %(exceedances)s 条, 气象记录 %(weather)s 条" % totals
         )
 
     @app.cli.command("reset-db")
@@ -45,10 +45,11 @@ def register_commands(app):
     def stats():
         """Print a short record summary."""
         click.echo(
-            "监测点 %d 个 / 监测数据 %d 条 / 超标记录 %d 条"
+            "监测点 %d 个 / 监测数据 %d 条 / 超标记录 %d 条 / 气象记录 %d 条"
             % (
                 Station.query.count(),
                 Measurement.query.count(),
                 Exceedance.query.count(),
+                WeatherRecord.query.count(),
             )
         )

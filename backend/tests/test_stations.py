@@ -1,5 +1,5 @@
 """监测点台账接口测试."""
-from app.models import Measurement, Station
+from app.models import Measurement, Station, WeatherRecord
 
 
 def test_create_station(client):
@@ -76,11 +76,29 @@ def test_delete_station_removes_measurements_and_exceedances(client, app, statio
     client.post("/api/measurements/entries", json=entry_payload(station.id))
     assert Measurement.query.count() == 3
 
+    weather_payload = {
+        "station_id": station.id,
+        "measured_at": "2026-09-01 10:00",
+        "period": "hourly",
+        "temperature": 28.5,
+        "humidity": 72,
+        "wind_speed": 2.1,
+        "wind_direction": 135,
+    }
+    weather_response = client.post("/api/weather/observations", json=weather_payload)
+    assert weather_response.status_code == 201
+    assert WeatherRecord.query.count() == 1
+
     response = client.delete("/api/stations/%d" % station.id)
     assert response.status_code == 200
-    assert response.get_json()["removed"] == {"measurements_removed": 3, "exceedances_removed": 1}
+    assert response.get_json()["removed"] == {
+        "measurements_removed": 3,
+        "exceedances_removed": 1,
+        "weather_removed": 1,
+    }
     assert Station.query.count() == 0
     assert Measurement.query.count() == 0
+    assert WeatherRecord.query.count() == 0
 
 
 def test_station_options_and_summary(client, station, second_station):

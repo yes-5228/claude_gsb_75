@@ -4,6 +4,7 @@ from .measurements import bp as measurements_bp
 from .meta import bp as meta_bp
 from .query import bp as query_bp
 from .stations import bp as stations_bp
+from .weather import bp as weather_bp
 
 BLUEPRINTS = (
     (meta_bp, "/api/meta"),
@@ -11,6 +12,7 @@ BLUEPRINTS = (
     (measurements_bp, "/api/measurements"),
     (exceedances_bp, "/api/exceedances"),
     (query_bp, "/api/query"),
+    (weather_bp, "/api/weather"),
 )
 
 
