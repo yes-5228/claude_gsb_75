@@ -11,12 +11,14 @@
 | 运行概览 | `/overview` | 监测点规模、数据总量、超标与待标注统计、近 7 日数据量趋势、待办超标列表 |
 | 监测点台账 | `/stations` | 台账增删改查、区域/类型/状态筛选、点位详情与分因子统计、级联清理关联数据 |
 | 监测数据录入 | `/measurements` | 按“监测点 + 时刻 + 周期”成组录入多因子浓度、超标校验预览、重复数据覆盖、录入结果回执 |
+| 气象与关联分析 | `/weather` | 温度/湿度/风速/风向/气压/降水量录入、记录筛选导出、与同期浓度对照、Pearson 相关与风向玫瑰分析 |
 | 超标记录标注 | `/exceedances` | 超标自动建单、单条/批量标注(确认 / 忽略 / 重置)、等级人工修正、标注留痕与统计 |
 | 数据查询 | `/query` | 多条件组合检索、聚合统计(按因子/站点/区域/日/月等)、分页浏览、CSV 导出 |
 
 设计要点:
 
 - **超标自动判定**: 数据写入时即按“因子 + 数据周期”取用限值, 计算超标倍数并分级, 同步生成待标注超标记录; 修正数据后超标记录自动更新或撤销。
+- **气象-浓度同期对照**: 气象记录与浓度按“监测点 + 观测时刻 + 周期”严格配对, 双轴时序图对照展示; 连续要素(温湿度/风速/气压/降水)计算 Pearson 相关系数, 风向按八方位玫瑰图统计各方位平均浓度与主导风向, 结果可按点位、时间范围、污染因子切换并导出配对明细。
 - **业务规则集中在后端**: 限值与分级规则位于 `backend/app/domain/`, 前端仅做展示与前置校验, 避免规则分叉。
 - **模块化组织**: 后端按 `api / services / models / domain / utils` 分层; 前端每个业务模块独占目录, 公共能力沉淀在 `components/`、`hooks/`、`api/`。
 
@@ -28,7 +30,7 @@
 | 数据库 | SQLite(默认, 零依赖) / PostgreSQL 16(可选, compose 覆盖文件) |
 | 前端 | React 18 · React Router 6 · Vite 7 · Axios · 原生 CSS(设计令牌 + 组件类) |
 | 部署 | Docker 多阶段构建 · Nginx 静态托管与 `/api` 反向代理 · docker compose |
-| 测试 | Pytest(43 个后端用例: 接口 + 领域规则) |
+| 测试 | Pytest(63 个后端用例: 接口 + 领域规则) |
 
 ## 目录结构
 
@@ -42,10 +44,10 @@
 │   │   ├── errors.py            # 统一异常与 JSON 错误响应
 │   │   ├── commands.py          # flask init-db / seed / reset-db / stats
 │   │   ├── seed.py              # 演示数据生成与启动引导
-│   │   ├── domain/              # 业务规则: 因子限值、枚举、超标分级
-│   │   ├── models/              # Station / Measurement / Exceedance
-│   │   ├── services/            # 台账、录入、标注、查询统计业务逻辑
-│   │   ├── api/                 # 蓝图: meta / stations / measurements / exceedances / query
+│   │   ├── domain/              # 业务规则: 因子限值、枚举、超标分级、气象要素与关联统计算法
+│   │   ├── models/              # Station / Measurement / WeatherRecord / Exceedance
+│   │   ├── services/            # 台账、浓度录入、气象录入与关联分析、标注、查询统计业务逻辑
+│   │   ├── api/                 # 蓝图: meta / stations / measurements / weather / exceedances / query
 │   │   └── utils/               # 校验器、分页、CSV 导出
 │   ├── tests/                   # Pytest 用例
 │   ├── Dockerfile · docker-entrypoint.sh · requirements*.txt
@@ -56,7 +58,7 @@
 │   │   ├── components/          # layout(侧边栏/顶栏) 与 common(表格/分页/弹窗/表单等)
 │   │   ├── constants/           # 路由、标签与色板映射
 │   │   ├── hooks/               # useListQuery / useAsyncData / useOptions
-│   │   ├── pages/               # overview / stations / measurements / exceedances / query
+│   │   ├── pages/               # overview / stations / measurements / weather / exceedances / query
 │   │   ├── styles/global.css    # 设计令牌与公共样式
 │   │   └── utils/               # 时间/数值格式化、下载
 │   ├── Dockerfile · nginx.conf · vite.config.js
@@ -80,7 +82,7 @@ docker compose up -d --build
 | 前端 | http://localhost:8080 | Nginx 托管, `/api` 反向代理到后端 |
 | 后端 | http://localhost:5000/api/meta/health | 健康检查 |
 
-首次启动会自动建表并写入演示数据(8 个监测点 / 1200 条监测数据 / 52 条超标记录), 可通过环境变量 `SEED_DEMO=false` 关闭。
+首次启动会自动建表并写入演示数据(8 个监测点 / 1200 条监测数据 / 200 条同期气象记录 / 约 70 条超标记录), 可通过环境变量 `SEED_DEMO=false` 关闭。
 
 ```bash
 docker compose ps          # 查看容器与健康状态
@@ -168,6 +170,11 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --buil
 | GET | `/api/query/measurements` | 高级条件检索 |
 | GET | `/api/query/statistics` | 聚合统计(`group_by` + `metric`) |
 | GET | `/api/query/export` | 查询结果导出 CSV |
+| GET | `/api/weather/context` | 气象录入表单选项(监测点、要素、周期、来源) |
+| GET/POST | `/api/weather` · `/api/weather/entries` | 气象记录分页筛选 / 成组录入(同点同时刻唯一, 可覆盖) |
+| GET/DELETE | `/api/weather/{id}` | 气象记录详情 / 删除 |
+| GET | `/api/weather/correlation` | 气象-浓度关联分析(点位/时间/污染因子/气象因子) |
+| GET | `/api/weather/export` · `/api/weather/correlation/export` | 气象记录 / 关联配对明细导出 CSV |
 
 `POST /api/measurements/entries` 请求示例:
 
@@ -200,15 +207,53 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --buil
 }
 ```
 
+`POST /api/weather/entries` 请求示例(未提交的要素视为缺测):
+
+```json
+{
+  "station_id": 1,
+  "measured_at": "2026-09-14 10:00",
+  "period": "hourly",
+  "temperature": 28.6,
+  "humidity": 74.0,
+  "wind_speed": 2.3,
+  "wind_direction": 135.0,
+  "pressure": 1006.5,
+  "precipitation": 0.0,
+  "recorder": "王敏",
+  "overwrite": false
+}
+```
+
+`GET /api/weather/correlation?pollutant=PM25&factor=wind_speed&station_id=1&date_from=...&date_to=...`
+按同点同时刻内连接配对浓度与气象观测, 返回: `params`(查询口径)、`sample_total`(配对样本数)、
+`result`(连续要素为 Pearson 相关系数/方向/强度, 风向为八方位平均浓度与主导风向)、
+`wind_result`(始终附带的风向统计)、`factor_ranking`(全部连续要素相关系数, 供前端切换因子)、
+`series`(最多 300 个对照时序点)。配对明细可通过 `/api/weather/correlation/export` 导出。
+
 ## 数据模型
 
 | 表 | 关键字段 | 说明 |
 | --- | --- | --- |
 | `stations` | `code`(唯一) `name` `area` `station_type` `status` `longitude/latitude` `installed_at` | 监测点台账 |
 | `measurements` | `station_id` `pollutant` `period` `value` `limit_value` `exceed_ratio` `is_exceeded` `measured_at` `data_source` `recorder` | 监测数据; `(station_id, pollutant, period, measured_at)` 唯一 |
+| `weather_records` | `station_id` `period` `measured_at` `temperature` `humidity` `wind_speed` `wind_direction` `pressure` `precipitation` `data_source` `recorder` | 气象要素快照; `(station_id, period, measured_at)` 唯一, 与浓度按此三元组配对 |
 | `exceedances` | `measurement_id`(唯一) `status` `level` `note` `annotator` `annotated_at` | 超标记录与人工标注 |
 
-删除监测点会级联清理其监测数据与超标记录; 删除监测数据会同时删除对应超标记录。
+删除监测点会级联清理其监测数据、气象记录与超标记录; 删除监测数据会同时删除对应超标记录。
+
+## 气象关联分析口径
+
+判定与统计算法位于 `backend/app/domain/weather.py`(要素定义、风向十六/八方位编码、静风判定)
+与 `backend/app/domain/correlation.py`(Pearson 相关、风向玫瑰)。
+
+- **配对规则**: 仅当浓度与气象记录的“监测点 + 观测时刻 + 数据周期”完全一致时才构成一组配对, 错时数据不参与计算。
+- **相关系数**: 对温度、相对湿度、风速、气压、降水量分别与所选污染因子浓度计算 Pearson r;
+  `|r| ≥ 0.8` 极强、`0.6~0.8` 强、`0.4~0.6` 中等、`0.2~0.4` 弱、`< 0.2` 极弱; 少于 3 组配对或方差为 0 时不输出系数。
+- **风向分析**: 风速低于 0.2 m/s 记为静风(C), 其余角度归入八方位(N/NE/E/.../NW),
+  统计各方位样本占比、平均/最大浓度, 并给出主导风向。
+- **切换与导出**: 点位、时间范围、污染因子、数据周期变化触发后端重算; 页面内切换气象因子使用同一批配对结果即时切换;
+  气象记录与配对明细均支持 CSV 导出(UTF-8 BOM, Excel 可直接打开)。
 
 ## 配置项
 
@@ -228,7 +273,7 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --buil
 
 ```bash
 cd backend
-python -m pytest -q          # 43 个用例: 台账 CRUD/级联、录入与超标判定、标注规则、查询统计与导出、元数据接口
+python -m pytest -q          # 63 个用例: 台账 CRUD/级联、浓度录入与超标判定、气象录入与关联分析、标注规则、查询统计与导出、元数据接口
 
 cd frontend
 npm run build                # 生产构建校验

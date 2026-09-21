@@ -1,4 +1,5 @@
 """演示数据生成与启动引导."""
+import math
 import random
 from datetime import date, datetime, timedelta
 
@@ -64,11 +65,63 @@ STATION_FACTOR = {
 HOURLY_POINTS = (2, 8, 14, 20)
 RECORDERS = ("李静", "王敏", "陈志强", "赵宇", "孙倩")
 
+# ---- 气象要素模拟参数: 刻意构造可被关联分析识别的浓度-气象关系 ----
+WIND_DIR_PICKS = (0, 22.5, 45, 67.5, 90, 135, 180, 225, 270, 315, 337.5)
 
-def _value(pollutant, period, station_type, rng):
+
+def _weather_snapshot(period, day, hour, station_type, rng):
+    """生成某时刻的一组气象要素, 带日变化与少量噪声."""
+    seasonal = 8.0 * math.sin((day.timetuple().tm_yday / 365.0) * 2 * math.pi - math.pi / 2)
+    if period == "daily":
+        diurnal = 0.0
+        wind_base = 2.6
+    else:
+        diurnal = 4.0 * math.sin(math.pi * (hour - 5) / 12.0)  # 午后最高
+        wind_base = 2.0 + (2.2 if hour in (14, 20) else 0.0) + (-0.8 if hour == 2 else 0.0)
+
+    temperature = round(24.0 + seasonal + diurnal + rng.uniform(-1.2, 1.2), 1)
+    humidity = round(
+        max(25.0, min(98.0, 82.0 - 1.6 * diurnal + rng.uniform(-7.0, 7.0))), 1
+    )
+    industrial_calm = 0.6 if station_type == "industrial" else 0.0
+    wind_speed = round(
+        max(0.0, wind_base + industrial_calm * -1.0 + rng.uniform(-0.9, 1.4)), 1
+    )
+    wind_direction = round(rng.choice(WIND_DIR_PICKS) + rng.uniform(-8.0, 8.0), 1) % 360.0
+    pressure = round(1008.0 - 0.25 * (temperature - 24.0) + rng.uniform(-3.0, 3.0), 1)
+    precipitation = round(max(0.0, rng.gauss(0.0, 2.2)), 1) if rng.random() < 0.22 else 0.0
+    return {
+        "temperature": temperature,
+        "humidity": humidity,
+        "wind_speed": wind_speed,
+        "wind_direction": wind_direction,
+        "pressure": pressure,
+        "precipitation": precipitation,
+    }
+
+
+def _weather_multiplier(pollutant, weather):
+    """让部分污染物浓度随气象要素系统性变化, 使关联结果可被直观验证."""
+    factor = 1.0
+    if pollutant in ("PM25", "PM10"):
+        # 高湿利于颗粒物吸湿增长, 大风利于扩散
+        factor *= 1.0 + (weather["humidity"] - 70.0) * 0.022
+        factor *= 1.0 + (2.5 - weather["wind_speed"]) * 0.14
+        if weather["precipitation"] > 0:
+            factor *= 0.7  # 降水湿清除
+    elif pollutant == "O3":
+        factor *= 1.0 + (weather["temperature"] - 24.0) * 0.05  # 高温光化学增强
+    elif pollutant == "SO2":
+        factor *= 1.0 + (2.5 - weather["wind_speed"]) * 0.12
+    return max(0.35, factor)
+
+
+def _value(pollutant, period, station_type, rng, weather=None):
     base = POLLUTANT_BASE[pollutant] * STATION_FACTOR.get(station_type, 1.0)
     if period == "hourly":
         base *= HOURLY_FACTOR[pollutant]
+    if weather is not None:
+        base *= _weather_multiplier(pollutant, weather)
     value = base * rng.uniform(0.72, 1.22)
     if rng.random() < 0.12:  # 少量明显超标样本, 便于演示超标标注
         value *= rng.uniform(1.8, 2.6)
@@ -76,8 +129,8 @@ def _value(pollutant, period, station_type, rng):
 
 
 def seed_demo_data(days=5, rng=None, recorder_pool=RECORDERS):
-    """Generate demo stations and monitoring records through the normal service path."""
-    from .services import measurement_service
+    """Generate demo stations, monitoring records and paired weather observations."""
+    from .services import measurement_service, weather_service
 
     rng = rng or random.Random(20260914)
     created_stations = []
@@ -88,12 +141,18 @@ def seed_demo_data(days=5, rng=None, recorder_pool=RECORDERS):
     db.session.commit()
 
     today = date.today()
-    totals = {"stations": len(created_stations), "measurements": 0, "exceedances": 0}
+    totals = {
+        "stations": len(created_stations), "measurements": 0,
+        "exceedances": 0, "weather": 0,
+    }
     for station in created_stations:
         for offset in range(days):
             day = today - timedelta(days=offset)
+
+            daily_weather = _weather_snapshot("daily", day, 0, station.station_type, rng)
             daily_entries = [
-                {"pollutant": code, "value": _value(code, "daily", station.station_type, rng)}
+                {"pollutant": code,
+                 "value": _value(code, "daily", station.station_type, rng, daily_weather)}
                 for code in POLLUTANT_BASE
             ]
             result = measurement_service.record_entries(
@@ -107,10 +166,24 @@ def seed_demo_data(days=5, rng=None, recorder_pool=RECORDERS):
             )
             totals["measurements"] += result["summary"]["created_count"]
             totals["exceedances"] += result["summary"]["exceeded_count"]
+            weather_service.record_observation(
+                station_id=station.id,
+                measured_at=datetime(day.year, day.month, day.day, 0, 0),
+                period="daily",
+                values=daily_weather,
+                data_source="device",
+                recorder=rng.choice(recorder_pool),
+                remark="日均值自动汇总",
+            )
+            totals["weather"] += 1
 
             for hour in HOURLY_POINTS:
+                hourly_weather = _weather_snapshot(
+                    "hourly", day, hour, station.station_type, rng
+                )
                 hourly_entries = [
-                    {"pollutant": code, "value": _value(code, "hourly", station.station_type, rng)}
+                    {"pollutant": code,
+                     "value": _value(code, "hourly", station.station_type, rng, hourly_weather)}
                     for code in HOURLY_FACTOR
                 ]
                 result = measurement_service.record_entries(
@@ -123,6 +196,15 @@ def seed_demo_data(days=5, rng=None, recorder_pool=RECORDERS):
                 )
                 totals["measurements"] += result["summary"]["created_count"]
                 totals["exceedances"] += result["summary"]["exceeded_count"]
+                weather_service.record_observation(
+                    station_id=station.id,
+                    measured_at=datetime(day.year, day.month, day.day, hour, 0),
+                    period="hourly",
+                    values=hourly_weather,
+                    data_source="manual",
+                    recorder=rng.choice(recorder_pool),
+                )
+                totals["weather"] += 1
 
     # 标注一部分超标记录, 让工作台同时存在待办与已处理记录
     from .services import exceedance_service
